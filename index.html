@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC + DAQ 안정구간 자동 병합</title>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+
+<style>
+:root{
+  --bg:#f6f7fb; --card:#fff; --text:#202637; --muted:#737b8a;
+  --line:#e2e6ed; --accent:#4967e8; --soft:#eef1ff;
+  --ok:#237547; --bad:#b83333;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
+.wrap{max-width:1280px;margin:30px auto;padding:0 18px 45px}
+h1{margin:0 0 8px;font-size:26px}
+.subtitle{color:var(--muted);line-height:1.6;margin-bottom:22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:21px;margin-bottom:18px;box-shadow:0 4px 18px rgba(30,40,70,.04)}
+.step-title{font-size:17px;font-weight:700;margin-bottom:14px}
+.upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.drop{border:2px dashed #bac1cf;border-radius:14px;padding:24px 14px;text-align:center;cursor:pointer;background:#fbfcff;min-height:120px;display:flex;flex-direction:column;justify-content:center}
+.drop.drag{border-color:var(--accent);background:var(--soft)}
+.drop.loaded{border-style:solid;border-color:#87b89a;background:#f6fcf8}
+.drop b{display:block;font-size:15px;margin-bottom:7px;word-break:break-all}
+.drop span{font-size:12.5px;color:var(--muted);line-height:1.5}
+input[type=file]{display:none}
+.controls{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px}
+.controls5{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:16px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+input[type=number],input[type=text],select{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:#fff;font-size:13.5px}
+.radiorow{display:flex;gap:18px;margin-top:4px}
+.radiorow label{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--text);margin:0}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:17px}
+button{border:0;border-radius:9px;padding:10px 15px;font-size:14px;font-weight:700;cursor:pointer}
+.primary{background:var(--accent);color:#fff}.secondary{background:#edf0f5;color:#2f3749}
+button:disabled{opacity:.45;cursor:default}
+.status{margin-top:13px;color:var(--muted);font-size:13.5px;line-height:1.55;white-space:pre-wrap}
+.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
+.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.box{background:#f8f9fc;border-radius:10px;padding:12px}
+.box small{display:block;color:var(--muted);margin-bottom:5px}.box strong{font-size:14px}
+.chart{height:440px}
+.table-wrap{overflow:auto;max-height:420px;border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:7px 9px;border-bottom:1px solid #eceef3;text-align:right;white-space:nowrap}
+th{position:sticky;top:0;background:#fafbfe;z-index:1}
+.note{font-size:12px;color:var(--muted);line-height:1.55;margin-top:10px}
+.hidden{display:none}
+hr{border:0;border-top:1px solid var(--line);margin:18px 0}
+.swatch{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:middle}
+.seg-label{text-align:left}
+@media(max-width:900px){
+  .upload-grid,.controls,.controls5,.summary{grid-template-columns:1fr 1fr}
+}
+@media(max-width:600px){
+  .upload-grid,.controls,.controls5,.summary{grid-template-columns:1fr}
+  .chart{height:390px}
+}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+  <h1>GC + DAQ 안정구간 자동 병합</h1>
+  <div class="subtitle">
+    Test station DAQ 로그와 GC raw data(Excel/CSV)의 시간을 맞춰 안정구간을 자동 탐지하고,
+    구간별로 색을 구분해 해당 구간의 GC 데이터를 정리합니다.
+  </div>
+
+  <div class="card">
+    <div class="step-title">① 파일 넣기</div>
+    <div class="upload-grid">
+      <div id="daqDrop" class="drop">
+        <b>DAQ 로그 (test station)</b>
+        <span>Time_day, Time_hour + SV/PV 컬럼 CSV<br>여러 날짜 파일 동시 선택 가능</span>
+        <input id="daqInput" type="file" accept=".csv,.xlsx,.xls" multiple>
+      </div>
+      <div id="gcDrop" class="drop">
+        <b>GC raw data</b>
+        <span>Compound별 Area 표 + injection schedule(Inj.Date)<br>Excel(.xlsx) / CSV</span>
+        <input id="gcInput" type="file" accept=".csv,.xlsx,.xls">
+      </div>
+    </div>
+    <div id="loadStatus" class="status"></div>
+  </div>
+
+  <div class="card">
+    <div class="step-title">② Reactor / 컬럼 매핑</div>
+    <div class="radiorow">
+      <label><input type="radio" name="reactor" value="A" checked> Reactor A (GC Signal TCD2B)</label>
+      <label><input type="radio" name="reactor" value="B"> Reactor B (GC Signal TCD1A)</label>
+    </div>
+    <div class="controls5">
+      <div><label>NH3 유량 SV 컬럼</label><input id="colSV" type="text" value="A_NH3_SV"></div>
+      <div><label>NH3 유량 PV 컬럼</label><input id="colPV" type="text" value="A_NH3_PV"></div>
+      <div><label>Furnace(설정온도) 컬럼</label><input id="colFurnace" type="text" value="A_Furnace"></div>
+      <div><label>TC(촉매층 실측온도) 컬럼</label><input id="colTC" type="text" value="TC_01"></div>
+      <div><label>GC Signal</label><input id="colSignal" type="text" value="TCD2B"></div>
+    </div>
+    <div class="note">파일마다 컬럼명이 다를 수 있어 직접 수정 가능합니다. Reactor를 바꾸면 기본값으로 자동 교체됩니다.</div>
+  </div>
+
+  <div id="gasCard" class="card hidden">
+    <div class="step-title">③ 볼 가스(성분) 선택</div>
+    <div id="gasSelect" class="radiorow" style="flex-wrap:wrap;row-gap:10px"></div>
+    <div class="note">GC 파일에서 인식된 성분 목록입니다. Reactor를 바꾸면 해당 GC Signal의 성분이 기본으로 체크됩니다. 필요하면 자유롭게 추가/해제하세요.</div>
+  </div>
+
+  <div class="card">
+    <div class="step-title">④ 안정구간 자동탐지 설정</div>
+    <div class="controls">
+      <div><label>판정 window (점)</label><input id="winPts" type="number" step="1" value="10"></div>
+      <div><label>온도 window 내 변동폭 허용치 (°C)</label><input id="tempFlat" type="number" step="any" value="2"></div>
+      <div><label>온도 허용오차 (Furnace 대비 %)</label><input id="tempTol" type="number" step="any" value="5"></div>
+      <div><label>유량 안정판정 오차 (%)</label><input id="flowStabTol" type="number" step="any" value="2"></div>
+    </div>
+    <div class="actions">
+      <button id="runBtn" class="primary" disabled>자동 분석 실행</button>
+    </div>
+    <div id="runStatus" class="status"></div>
+    <div class="note">
+      최근 window 구간에서 Furnace(설정온도)의 변동폭이 허용치 이내(=램프가 끝나고 유지 중)이고,
+      TC(실측온도)가 Furnace 대비 허용오차 이내이며,
+      NH3 PV(실측유량)의 표준편차가 허용오차 이내인 지점들을 안정 상태로 판정합니다.
+      이 조건이 동시에 유지되는 연속 구간을 하나의 안정구간으로 묶습니다. 온도 램프 도중이나 워밍업 구간은 자동으로 제외됩니다.
+    </div>
+  </div>
+
+  <div id="summaryCard" class="card hidden">
+    <div class="summary">
+      <div class="box"><small>DAQ 포인트</small><strong id="nDaq">-</strong></div>
+      <div class="box"><small>판정 window</small><strong id="nStep">-</strong></div>
+      <div class="box"><small>안정구간 수</small><strong id="nSeg">-</strong></div>
+      <div class="box"><small>매칭된 GC injection</small><strong id="nGcMatched">-</strong></div>
+    </div>
+  </div>
+
+  <div id="chartCard" class="card hidden">
+    <h3>DAQ 시계열 (안정구간 음영표시)</h3>
+    <div id="daqChart" class="chart"></div>
+  </div>
+
+  <div id="segTableCard" class="card hidden">
+    <h3>안정구간 목록</h3>
+    <div class="table-wrap"><table id="segTable"></table></div>
+  </div>
+
+  <div id="gcTableCard" class="card hidden">
+    <h3>GC 병합 결과</h3>
+    <div class="table-wrap"><table id="gcTable"></table></div>
+    <div class="actions">
+      <button id="excelBtn" class="primary" disabled>최종 Excel 다운로드</button>
+    </div>
+    <div class="note">다운로드할 때마다 저장 위치를 직접 고르려면 Chrome → 설정 → 다운로드 → "다운로드 전에 각 파일의 저장 위치 확인"을 켜고 실행하는 것을 권장합니다.</div>
+  </div>
+
+  <div class="card">
+    <div class="step-title">⑤ 목표 조건으로 찾기</div>
+    <div class="controls5">
+      <div><label>목표 NH3 유량 (SV)</label><input id="targetFlow" type="number" step="any" placeholder="예: 825"></div>
+      <div><label>유량 허용오차</label><input id="targetFlowEps" type="number" step="any" value="5"></div>
+      <div><label>목표 온도 (Furnace, °C)</label><input id="targetTemp" type="number" step="any" placeholder="예: 400"></div>
+      <div style="align-self:end"><button id="searchBtn" class="primary" disabled>이 조건 찾기</button></div>
+      <div style="align-self:end"><button id="clearSearchBtn" class="secondary">전체 보기</button></div>
+    </div>
+    <div class="note">온도 허용오차는 위 ③의 "온도 허용오차 (%)" 값을 그대로 사용합니다.</div>
+    <div id="searchStatus" class="status"></div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const PALETTE=["#4967e8","#e8694f","#3fa66b","#c0439a","#d4a017","#2ba7b0",
+                "#8a5fd6","#c96b2e","#5c8a2b","#d9436d","#2f7fc1","#a06f3b"];
+
+let daqRows=[];      // merged, sorted DAQ rows {tMs, cols:{...}}
+let daqHeaders=[];
+let gcBlocks=[];      // [{name,signal,col,dataRows:[{inj,type,rt,area,height,conc}]}]
+let injTimes=new Map(); // inj# -> Date
+let segments=[];     // computed stable segments
+let mergedGC=[];      // final joined GC rows
+let searchFilterIds=null; // Set of segment ids currently filtered, or null = show all
+
+const REACTOR_DEFAULTS={
+  A:{sv:"A_NH3_SV",pv:"A_NH3_PV",furnace:"A_Furnace",tc:"TC_01",signal:"TCD2B"},
+  B:{sv:"B_NH3_SV",pv:"B_NH3_PV",furnace:"B_Furnace PV",tc:"TC_03",signal:"TCD1A"}
+};
+
+document.querySelectorAll('input[name=reactor]').forEach(r=>{
+  r.addEventListener('change',e=>{
+    const d=REACTOR_DEFAULTS[e.target.value];
+    $("colSV").value=d.sv;$("colPV").value=d.pv;$("colFurnace").value=d.furnace;
+    $("colTC").value=d.tc;$("colSignal").value=d.signal;
+    if(gcBlocks.length) populateGasSelect(d.signal);
+  });
+});
+
+function populateGasSelect(defaultSignal){
+  const container=$("gasSelect");
+  container.innerHTML="";
+  gcBlocks.forEach(b=>{
+    const id="gas_"+b.name.replace(/[^a-zA-Z0-9]/g,"_");
+    const label=document.createElement("label");
+    const cb=document.createElement("input");
+    cb.type="checkbox"; cb.className="gasChk"; cb.value=b.name; cb.id=id;
+    cb.checked = !defaultSignal || b.signal===defaultSignal;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(` ${b.name} (${b.signal || "signal 없음"}, ${b.dataRows.length}건)`));
+    container.appendChild(label);
+  });
+  $("gasCard").classList.remove("hidden");
+}
+
+/* ---------------- FILE LOADING ---------------- */
+
+function norm(v){return String(v??"").trim().toLowerCase().replace(/[_\-\/().:#]+/g," ").replace(/\s+/g," ").trim()}
+function toNum(v){
+  if(typeof v==="number") return Number.isFinite(v)?v:NaN;
+  if(v===null||v===undefined||v==="") return NaN;
+  return Number(String(v).replace(/,/g,"").trim());
+}
+function aoa(wb,s){return XLSX.utils.sheet_to_json(wb.Sheets[s],{header:1,defval:null,raw:true})}
+function setStatus(id,msg,type=""){$(id).textContent=msg;$(id).className="status "+type}
+function fmt(v){
+  if(v===null||v===undefined||!Number.isFinite(Number(v)))return "";
+  const n=Number(v);
+  if(Math.abs(n)>0 && Math.abs(n)<1e-4)return n.toExponential(4);
+  return Number(n.toPrecision(8)).toString();
+}
+function pad2(n){return String(n).padStart(2,"0")}
+// All timestamps are handled as epoch ms representing an absolute instant.
+// Display always renders as KST (+09:00), independent of the browser's own
+// local timezone setting, by shifting the epoch and reading UTC fields.
+const KST_MS=9*3600*1000;
+function kstDate(ms){return new Date(ms+KST_MS)}
+function fmtDate(ms){
+  if(!Number.isFinite(ms))return "";
+  const d=kstDate(ms);
+  return d.getUTCFullYear()+"-"+pad2(d.getUTCMonth()+1)+"-"+pad2(d.getUTCDate())+" "+
+         pad2(d.getUTCHours())+":"+pad2(d.getUTCMinutes())+":"+pad2(d.getUTCSeconds());
+}
+
+function decodeBuffer(buf, enc){
+  return new TextDecoder(enc).decode(new Uint8Array(buf));
+}
+
+/* ---- DAQ ---- */
+
+$("daqDrop").onclick=()=>$("daqInput").click();
+$("daqDrop").addEventListener("dragover",e=>{e.preventDefault();$("daqDrop").classList.add("drag")});
+$("daqDrop").addEventListener("dragleave",()=>$("daqDrop").classList.remove("drag"));
+$("daqDrop").addEventListener("drop",e=>{
+  e.preventDefault();$("daqDrop").classList.remove("drag");
+  if(e.dataTransfer.files.length) loadDaqFiles(e.dataTransfer.files);
+});
+$("daqInput").addEventListener("change",e=>{
+  if(e.target.files.length) loadDaqFiles(e.target.files);
+});
+
+let daqFileNames=[];
+function loadDaqFiles(fileList){
+  const files=Array.from(fileList);
+  let remaining=files.length;
+  let allRows=[];
+  let errors=[];
+  daqFileNames=[];
+  files.forEach(file=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try{
+        const rows=parseDaqBuffer(e.target.result, file.name);
+        allRows=allRows.concat(rows);
+        daqFileNames.push(file.name);
+      }catch(err){
+        errors.push(file.name+": "+err.message);
+      }
+      remaining--;
+      if(remaining===0) finishDaqLoad(allRows, errors);
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function parseDaqBuffer(buf, fname){
+  const ext=fname.split(".").pop().toLowerCase();
+  let text;
+  if(ext==="csv"){
+    // Korean DAQ software typically exports CP949/EUC-KR
+    text=decodeBuffer(buf,"euc-kr");
+    if(text.indexOf("Time_day")<0 && text.indexOf("Time_hour")<0){
+      text=decodeBuffer(buf,"utf-8");
+    }
+  }else{
+    text=null;
+  }
+  let wb;
+  if(text!==null) wb=XLSX.read(text,{type:"string"});
+  else wb=XLSX.read(new Uint8Array(buf),{type:"array"});
+
+  const rows=aoa(wb,wb.SheetNames[0]);
+  const header=rows[0].map(h=>String(h??"").trim());
+  if(daqHeaders.length===0) daqHeaders=header;
+
+  const dayIdx=header.findIndex(h=>norm(h)==="time day");
+  const hourIdx=header.findIndex(h=>norm(h)==="time hour");
+  if(dayIdx<0||hourIdx<0) throw new Error("Time_day / Time_hour 컬럼을 찾지 못했습니다.");
+
+  const out=[];
+  for(let r=1;r<rows.length;r++){
+    const row=rows[r];
+    if(!row||row[dayIdx]===null||row[dayIdx]===undefined)continue;
+
+    // Time_day: SheetJS's CSV parser may auto-convert "YYYY-MM-DD" text into
+    // an Excel date serial number, or leave it as plain text. Handle both.
+    let y,mo,d;
+    const dayVal=row[dayIdx];
+    if(typeof dayVal==="number"){
+      const dc=XLSX.SSF.parse_date_code(dayVal);
+      if(!dc)continue;
+      y=dc.y;mo=dc.m;d=dc.d;
+    }else{
+      const dm=String(dayVal).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if(!dm)continue;
+      y=+dm[1];mo=+dm[2];d=+dm[3];
+    }
+
+    // Time_hour: usually Korean AM/PM text "오전 12:00:00", but may also
+    // auto-convert to a fractional day-serial number depending on locale/parser.
+    let h,mi,sec;
+    const hourVal=row[hourIdx];
+    if(typeof hourVal==="number"){
+      const frac=hourVal - Math.floor(hourVal);
+      const totalSec=Math.round(frac*86400);
+      h=Math.floor(totalSec/3600);mi=Math.floor((totalSec%3600)/60);sec=totalSec%60;
+    }else{
+      const hourStr=String(hourVal??"").trim();
+      const m=hourStr.match(/^(오전|오후)\s*(\d{1,2}):(\d{2}):(\d{2})$/);
+      if(m){
+        h=+m[2];mi=+m[3];sec=+m[4];
+        if(m[1]==="오전"){ if(h===12)h=0; } else { if(h!==12)h+=12; }
+      }else{
+        const m2=hourStr.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+        if(!m2)continue;
+        h=+m2[1];mi=+m2[2];sec=+m2[3];
+      }
+    }
+
+    const iso=`${y}-${pad2(mo)}-${pad2(d)}T${pad2(h)}:${pad2(mi)}:${pad2(sec)}+09:00`;
+    const tMs=new Date(iso).getTime();
+    if(!Number.isFinite(tMs))continue;
+    const cols={};
+    header.forEach((h2,ci)=>{
+      if(ci===dayIdx||ci===hourIdx||!h2)return;
+      cols[h2]=toNum(row[ci]);
+    });
+    out.push({tMs,cols});
+  }
+  return out;
+}
+
+function finishDaqLoad(rows, errors){
+  rows.sort((a,b)=>a.tMs-b.tMs);
+  daqRows=rows;
+  const zone=$("daqDrop");
+  if(rows.length){
+    zone.classList.add("loaded");
+    zone.querySelector("b").textContent="✓ "+daqFileNames.join(", ");
+  }
+  let msg=`DAQ 로그 ${rows.length}행을 읽었습니다 (${daqFileNames.length}개 파일 병합, 시간순 정렬).`;
+  if(errors.length) msg+="\n오류: "+errors.join(" / ");
+  setStatus("loadStatus", msg, errors.length?"bad":"ok");
+  checkReady();
+}
+
+/* ---- GC ---- */
+
+$("gcDrop").onclick=()=>$("gcInput").click();
+$("gcDrop").addEventListener("dragover",e=>{e.preventDefault();$("gcDrop").classList.add("drag")});
+$("gcDrop").addEventListener("dragleave",()=>$("gcDrop").classList.remove("drag"));
+$("gcDrop").addEventListener("drop",e=>{
+  e.preventDefault();$("gcDrop").classList.remove("drag");
+  if(e.dataTransfer.files.length) loadGcFile(e.dataTransfer.files[0]);
+});
+$("gcInput").addEventListener("change",e=>{
+  if(e.target.files.length) loadGcFile(e.target.files[0]);
+});
+
+function loadGcFile(file){
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const parsed=parseGcBuffer(e.target.result, file.name);
+      gcBlocks=parsed.blocks;
+      injTimes=parsed.injTimes;
+      const zone=$("gcDrop");
+      zone.classList.add("loaded");
+      zone.querySelector("b").textContent="✓ "+file.name;
+      const currentSignal=$("colSignal").value.trim();
+      populateGasSelect(currentSignal);
+      const summary=gcBlocks.map(b=>`${b.name}(${b.signal}): ${b.dataRows.length}건`).join(", ");
+      setStatus("loadStatus",
+        (daqRows.length?"":"")+`GC 데이터 인식 완료: ${summary}\ninjection schedule ${injTimes.size}건에서 시각을 확인했습니다.`,
+        "ok");
+    }catch(err){
+      setStatus("loadStatus","GC 파일 읽기 오류: "+err.message,"bad");
+    }
+    checkReady();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function findCol(headerRow, matcher){
+  for(let i=0;i<headerRow.length;i++){
+    if(matcher(norm(headerRow[i]))) return i;
+  }
+  return -1;
+}
+
+function parseGcBuffer(buf, fname){
+  const ext=fname.split(".").pop().toLowerCase();
+  let wb;
+  if(ext==="csv"){
+    let text=decodeBuffer(buf,"utf-8");
+    wb=XLSX.read(text,{type:"string"});
+    if(!hasCompoundBlock(wb)){
+      text=decodeBuffer(buf,"euc-kr");
+      wb=XLSX.read(text,{type:"string"});
+    }
+  }else{
+    wb=XLSX.read(new Uint8Array(buf),{type:"array"});
+  }
+  return parseGcWorkbook(wb);
+}
+
+function hasCompoundBlock(wb){
+  const rows=aoa(wb,wb.SheetNames[0]);
+  return rows.some(r=>r&&r.some(c=>norm(c)==="compound"));
+}
+
+function parseGcWorkbook(wb){
+  const rows=aoa(wb,wb.SheetNames[0]);
+
+  const compoundRowIdx=[];
+  rows.forEach((r,i)=>{ if(r&&r.some(c=>norm(c)==="compound")) compoundRowIdx.push(i); });
+  if(!compoundRowIdx.length) throw new Error("Compound: 블록을 찾지 못했습니다.");
+
+  let schedRowIdx=-1;
+  rows.forEach((r,i)=>{ if(r&&r.some(c=>norm(c)==="inj date")) schedRowIdx=i; });
+  if(schedRowIdx<0) throw new Error("Inj.Date가 있는 injection schedule을 찾지 못했습니다.");
+
+  // schedule
+  const schedHeader=rows[schedRowIdx];
+  const schedInjCol=findCol(schedHeader,n=>n==="inj");
+  const schedDateCol=findCol(schedHeader,n=>n==="inj date");
+  if(schedInjCol<0||schedDateCol<0) throw new Error("schedule에서 Inj#/Inj.Date 컬럼을 찾지 못했습니다.");
+
+  const injTimes=new Map();
+  for(let r=schedRowIdx+1;r<rows.length;r++){
+    const row=rows[r];
+    if(!row)continue;
+    const injVal=row[schedInjCol];
+    if(injVal===null||injVal===undefined||injVal==="")continue;
+    const dateVal=row[schedDateCol];
+    const d=parseInjDate(dateVal);
+    if(d) injTimes.set(Number(injVal), d);
+  }
+
+  // compound blocks
+  const blocks=[];
+  for(let bi=0; bi<compoundRowIdx.length; bi++){
+    const cRow=compoundRowIdx[bi];
+    const blockEnd = bi+1<compoundRowIdx.length ? compoundRowIdx[bi+1] : schedRowIdx;
+    const crow=rows[cRow];
+    let name=null, signal=null, sawCompound=false, sawSignal=false;
+    crow.forEach(cell=>{
+      const n=norm(cell);
+      if(n==="compound"){sawCompound=true;return}
+      if(n==="signal"){sawSignal=true;return}
+      if(cell===null||cell==="")return;
+      if(sawSignal && signal===null){signal=String(cell);return}
+      if(sawCompound && name===null){name=String(cell);return}
+    });
+    const headerRow=rows[cRow+1];
+    const col={
+      inj:findCol(headerRow,n=>n==="inj"),
+      type:findCol(headerRow,n=>n==="type"),
+      rt:findCol(headerRow,n=>n.startsWith("rt")),
+      conc:findCol(headerRow,n=>n.startsWith("concentration")),
+      area:findCol(headerRow,n=>n==="area"),
+      height:findCol(headerRow,n=>n==="height"),
+    };
+    const dataRows=[];
+    for(let r=cRow+2;r<blockEnd;r++){
+      const row=rows[r];
+      if(!row)continue;
+      const typeVal=col.type>=0?row[col.type]:null;
+      const tnorm=String(typeVal??"").trim();
+      if(tnorm==="Mean"||tnorm==="StdDev"||tnorm==="RSD")continue;
+      const injVal=col.inj>=0?row[col.inj]:null;
+      if(injVal===null||injVal===undefined||injVal==="")continue;
+      dataRows.push({
+        inj:Number(injVal),
+        type:tnorm,
+        rt:col.rt>=0?toNum(row[col.rt]):NaN,
+        area:col.area>=0?toNum(row[col.area]):NaN,
+        height:col.height>=0?toNum(row[col.height]):NaN,
+        conc:col.conc>=0?toNum(row[col.conc]):NaN,
+      });
+    }
+    blocks.push({name:name||("Block "+(bi+1)), signal:signal||"", col, dataRows});
+  }
+
+  return {blocks, injTimes};
+}
+
+function parseInjDate(v){
+  if(v===null||v===undefined||v==="")return null;
+  if(typeof v==="number"){
+    // Excel serial date
+    const d=XLSX.SSF.parse_date_code(v);
+    if(!d)return null;
+    const iso=`${d.y}-${pad2(d.m)}-${pad2(d.d)}T${pad2(d.H)}:${pad2(d.M)}:${pad2(Math.round(d.S))}+09:00`;
+    return new Date(iso);
+  }
+  const s=String(v).trim();
+  const m=s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})([+-]\d{2}:?\d{2})?$/);
+  if(m){
+    const tz=m[7]?m[7].replace(/^([+-]\d{2})(\d{2})$/,"$1:$2"):"+09:00";
+    const d=new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${tz}`);
+    return Number.isFinite(d.getTime())?d:null;
+  }
+  const d2=new Date(s);
+  return Number.isFinite(d2.getTime())?d2:null;
+}
+
+function checkReady(){
+  const ready=daqRows.length>0 && gcBlocks.length>0;
+  $("runBtn").disabled=!ready;
+}
+
+/* ---------------- STEP / SEGMENT DETECTION ---------------- */
+
+function findDaqNearestAtOrBefore(tMs){
+  if(!daqRows.length||tMs<daqRows[0].tMs)return -1;
+  let lo=0,hi=daqRows.length-1;
+  while(lo<hi){
+    const mid=Math.ceil((lo+hi)/2);
+    if(daqRows[mid].tMs<=tMs)lo=mid;else hi=mid-1;
+  }
+  return lo;
+}
+
+function runAnalysis(){
+  try{
+    const svCol=$("colSV").value.trim();
+    const pvCol=$("colPV").value.trim();
+    const furnaceCol=$("colFurnace").value.trim();
+    const tcCol=$("colTC").value.trim();
+    const signal=$("colSignal").value.trim();
+
+    const winPts=Math.max(3,Math.round(toNum($("winPts").value)));
+    const tempFlatC=toNum($("tempFlat").value);
+    const tempTolPct=toNum($("tempTol").value);
+    const flowStabTolPct=toNum($("flowStabTol").value);
+
+    if(!daqRows.length)throw new Error("DAQ 로그를 먼저 넣어주세요.");
+    const sample=daqRows[0].cols;
+    [svCol,pvCol,furnaceCol,tcCol].forEach(c=>{
+      if(!(c in sample)) throw new Error(`DAQ 로그에 "${c}" 컬럼이 없습니다. 컬럼명을 확인해 주세요.`);
+    });
+
+    // Per-row stability: look at the trailing window (not just the previous
+    // sample) so a slow temperature ramp isn't mistaken for a series of tiny
+    // "steps" — only a genuinely flat window counts as holding.
+    const n=daqRows.length;
+    const stable=new Array(n).fill(false);
+    for(let i=0;i<n;i++){
+      const lo=i-winPts+1;
+      if(lo<0){ stable[i]=false; continue; }
+
+      let fMin=Infinity, fMax=-Infinity;
+      let pvSum=0;
+      for(let j=lo;j<=i;j++){
+        const f=daqRows[j].cols[furnaceCol];
+        if(f<fMin)fMin=f; if(f>fMax)fMax=f;
+        pvSum+=daqRows[j].cols[pvCol];
+      }
+      const furnaceFlat=(fMax-fMin)<=tempFlatC;
+
+      const tc=daqRows[i].cols[tcCol], f=daqRows[i].cols[furnaceCol];
+      const tempOK= Math.abs(f)>1e-9 ? Math.abs(tc-f)/Math.abs(f)<=tempTolPct/100 : Math.abs(tc-f)<=2;
+
+      const pvMean=pvSum/winPts;
+      let pvVar=0;
+      for(let j=lo;j<=i;j++){ const d=daqRows[j].cols[pvCol]-pvMean; pvVar+=d*d; }
+      const pvStd=Math.sqrt(pvVar/winPts);
+      const sv=daqRows[i].cols[svCol];
+      const scale=Math.abs(sv)>1e-9?Math.abs(sv):1;
+      const flowOK= pvStd <= (flowStabTolPct/100)*scale;
+
+      stable[i]=furnaceFlat && tempOK && flowOK;
+    }
+
+    // maximal contiguous stable runs -> segments
+    const segs=[];
+    let runStart=null;
+    for(let i=0;i<=n;i++){
+      const isStable=i<n && stable[i];
+      if(isStable && runStart===null) runStart=i;
+      if(!isStable && runStart!==null){
+        const s=runStart, e=i-1;
+        const avg=col=>{
+          let sum=0; for(let j=s;j<=e;j++) sum+=daqRows[j].cols[col];
+          return sum/(e-s+1);
+        };
+        segs.push({
+          startMs:daqRows[s].tMs, endMs:daqRows[e].tMs,
+          svVal:avg(svCol), furnaceVal:avg(furnaceCol),
+          meanPV:avg(pvCol), meanTC:avg(tcCol),
+        });
+        runStart=null;
+      }
+    }
+    segs.forEach((s,i)=>{ s.id=i; s.color=PALETTE[i%PALETTE.length]; });
+    segments=segs;
+    const nStep=segments.length; // kept for the summary box label
+
+    // 4) attach GC injections — only for the gases checked in card ③
+    const selectedGases=new Set(Array.from(document.querySelectorAll(".gasChk:checked")).map(el=>el.value));
+    if(!selectedGases.size) throw new Error("가스(성분)를 하나 이상 선택해 주세요.");
+    mergedGC=[];
+    gcBlocks.filter(b=>selectedGases.has(b.name)).forEach(block=>{
+      block.dataRows.forEach(row=>{
+        const dt=injTimes.get(row.inj);
+        const tMs=dt?dt.getTime():null;
+        let seg=null;
+        if(tMs!==null){
+          seg=segments.find(s=>tMs>=s.startMs && tMs<=s.endMs) || null;
+        }
+        const dIdx=tMs!==null?findDaqNearestAtOrBefore(tMs):-1;
+        const daqVals=dIdx>=0?daqRows[dIdx].cols:null;
+        mergedGC.push({
+          compound:block.name, signal:block.signal, inj:row.inj, type:row.type,
+          rt:row.rt, area:row.area, height:row.height, conc:row.conc,
+          tMs, segId:seg?seg.id:null, segColor:seg?seg.color:null,
+          sv:daqVals?daqVals[svCol]:null, pv:daqVals?daqVals[pvCol]:null,
+          furnace:daqVals?daqVals[furnaceCol]:null, tc:daqVals?daqVals[tcCol]:null,
+        });
+      });
+    });
+    mergedGC.sort((a,b)=>(a.tMs??Infinity)-(b.tMs??Infinity));
+
+    // render
+    $("nDaq").textContent=daqRows.length+" pts";
+    $("nStep").textContent=winPts+"점";
+    $("nSeg").textContent=segments.length;
+    $("nGcMatched").textContent=mergedGC.filter(r=>r.segId!==null).length+" / "+mergedGC.length;
+    $("summaryCard").classList.remove("hidden");
+
+    drawChart(svCol,pvCol,furnaceCol,tcCol);
+    $("chartCard").classList.remove("hidden");
+
+    renderSegTable();
+    $("segTableCard").classList.remove("hidden");
+
+    searchFilterIds=null;
+    renderGcTable();
+    $("gcTableCard").classList.remove("hidden");
+    $("excelBtn").disabled=false;
+    $("searchBtn").disabled=false;
+
+    setStatus("runStatus",
+      `분석 완료 ✓  안정구간 ${segments.length}개를 찾았습니다.\nGC injection ${mergedGC.length}건 중 ${mergedGC.filter(r=>r.segId!==null).length}건이 안정구간에 매칭되었습니다.`,
+      "ok");
+  }catch(err){
+    setStatus("runStatus","분석 오류: "+err.message,"bad");
+  }
+}
+$("runBtn").onclick=runAnalysis;
+
+function drawChart(svCol,pvCol,furnaceCol,tcCol){
+  const x=daqRows.map(r=>kstDate(r.tMs));
+  const traces=[
+    {x,y:daqRows.map(r=>r.cols[pvCol]),mode:"lines",name:"NH3 flow PV",line:{width:1.4}},
+    {x,y:daqRows.map(r=>r.cols[svCol]),mode:"lines",name:"NH3 flow SV",line:{width:1,dash:"dot"},yaxis:"y"},
+    {x,y:daqRows.map(r=>r.cols[tcCol]),mode:"lines",name:"TC (실측온도)",line:{width:1.4},yaxis:"y2"},
+    {x,y:daqRows.map(r=>r.cols[furnaceCol]),mode:"lines",name:"Furnace (설정온도)",line:{width:1,dash:"dot"},yaxis:"y2"},
+  ];
+  const shapes=segments.map(s=>({
+    type:"rect",xref:"x",yref:"paper",x0:kstDate(s.startMs),x1:kstDate(s.endMs),
+    y0:0,y1:1,fillcolor:s.color,opacity:0.15,line:{width:0}
+  }));
+  Plotly.newPlot("daqChart",traces,{
+    margin:{l:65,r:65,t:20,b:50},
+    xaxis:{title:"시각",showgrid:true},
+    yaxis:{title:"유량",showgrid:true,zeroline:false},
+    yaxis2:{title:"온도 (°C)",overlaying:"y",side:"right",showgrid:false,zeroline:false},
+    legend:{orientation:"h",y:1.15},
+    shapes,
+    paper_bgcolor:"#fff",plot_bgcolor:"#fff"
+  },{responsive:true,displaylogo:false});
+}
+
+function renderSegTable(){
+  const table=$("segTable");table.innerHTML="";
+  const thd=document.createElement("tr");
+  ["","#","시작","끝","지속(분)","NH3 SV 평균","NH3 PV 평균","Furnace 평균","TC 평균"].forEach(h=>{
+    const th=document.createElement("th");th.textContent=h;
+    if(h==="")th.classList.add("seg-label");
+    thd.appendChild(th);
+  });
+  table.appendChild(thd);
+  const tb=document.createElement("tbody");
+  segments.forEach(s=>{
+    const tr=document.createElement("tr");
+    const durMin=(s.endMs-s.startMs)/60000;
+    const cells=[
+      `<span class="swatch" style="background:${s.color}"></span>`,
+      s.id+1, fmtDate(s.startMs), fmtDate(s.endMs), fmt(durMin),
+      fmt(s.svVal), fmt(s.meanPV), fmt(s.furnaceVal), fmt(s.meanTC)
+    ];
+    cells.forEach((c,ci)=>{
+      const td=document.createElement("td");
+      td.innerHTML=c;
+      if(ci===0)td.classList.add("seg-label");
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+}
+
+function renderGcTable(){
+  const table=$("gcTable");table.innerHTML="";
+  const headers=["Compound","Inj#","시각","안정구간","Area","Height","Concentration","RT","NH3 SV","NH3 PV","Furnace","TC"];
+  const thd=document.createElement("thead"),tr=document.createElement("tr");
+  headers.forEach(h=>{const th=document.createElement("th");th.textContent=h;tr.appendChild(th)});
+  thd.appendChild(tr);table.appendChild(thd);
+  const tb=document.createElement("tbody");
+  const rows= searchFilterIds ? mergedGC.filter(r=>r.segId!==null && searchFilterIds.has(r.segId)) : mergedGC;
+  rows.slice(0,2000).forEach(r=>{
+    const tr=document.createElement("tr");
+    if(r.segColor) tr.style.background=r.segColor+"22";
+    const segLabel=r.segId!==null?("#"+(r.segId+1)):"-";
+    const cells=[r.compound, r.inj, r.tMs?fmtDate(r.tMs):"-", segLabel,
+      fmt(r.area), fmt(r.height), fmt(r.conc), fmt(r.rt),
+      fmt(r.sv), fmt(r.pv), fmt(r.furnace), fmt(r.tc)];
+    cells.forEach(c=>{const td=document.createElement("td");td.textContent=c;tr.appendChild(td)});
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+}
+
+/* ---------------- TARGET SEARCH ---------------- */
+
+$("searchBtn").onclick=()=>{
+  const tf=toNum($("targetFlow").value), tt=toNum($("targetTemp").value);
+  if(!Number.isFinite(tf)&&!Number.isFinite(tt)){
+    setStatus("searchStatus","목표 유량 또는 목표 온도를 입력해 주세요.","bad");
+    return;
+  }
+  const flowEps=toNum($("targetFlowEps").value), tempTolPct=toNum($("tempTol").value);
+  const matched=segments.filter(s=>{
+    const flowOk=!Number.isFinite(tf) || Math.abs(s.svVal-tf)<=flowEps;
+    const tempOk=!Number.isFinite(tt) || (Math.abs(tt)>1e-9 ? Math.abs(s.furnaceVal-tt)/Math.abs(tt)<=tempTolPct/100 : Math.abs(s.furnaceVal-tt)<=2);
+    return flowOk&&tempOk;
+  });
+  searchFilterIds=new Set(matched.map(s=>s.id));
+  renderGcTable();
+  if(matched.length){
+    setStatus("searchStatus",
+      `조건에 맞는 안정구간 ${matched.length}개를 찾았습니다: `+
+      matched.map(s=>`#${s.id+1} (SV ${fmt(s.svVal)}, Furnace ${fmt(s.furnaceVal)}°C)`).join(", "),
+      "ok");
+  }else{
+    setStatus("searchStatus","조건에 맞는 안정구간이 없습니다. 오차범위를 넓혀보세요.","bad");
+  }
+};
+$("clearSearchBtn").onclick=()=>{
+  searchFilterIds=null;
+  renderGcTable();
+  setStatus("searchStatus","전체 결과를 표시합니다.","");
+};
+
+/* ---------------- EXCEL EXPORT (ExcelJS — supports real cell fill colors) ---------------- */
+
+const HEADER_FILL={type:"pattern",pattern:"solid",fgColor:{argb:"FF4967E8"}};
+const HEADER_FONT={bold:true,color:{argb:"FFFFFFFF"}};
+function segArgb(hex){ return "FF"+hex.replace("#","").toUpperCase(); }
+
+$("excelBtn").onclick=async ()=>{
+  try{
+    if(!mergedGC.length)throw new Error("먼저 분석을 실행해 주세요.");
+    $("excelBtn").disabled=true;
+    const prevLabel=$("excelBtn").textContent;
+    $("excelBtn").textContent="저장 중…";
+
+    const wb=new ExcelJS.Workbook();
+
+    // GC_Merged — one row per GC injection, colored by matched stable segment
+    const ws1=wb.addWorksheet("GC_Merged");
+    ws1.columns=[
+      {header:"Compound",key:"compound",width:12},{header:"Signal",key:"signal",width:10},
+      {header:"Inj#",key:"inj",width:8},{header:"Inj.Date",key:"date",width:20},
+      {header:"Segment",key:"seg",width:10},{header:"Area",key:"area",width:14},
+      {header:"Height",key:"height",width:12},{header:"Concentration",key:"conc",width:14},
+      {header:"RT [min]",key:"rt",width:10},{header:"NH3 SV",key:"sv",width:10},
+      {header:"NH3 PV",key:"pv",width:10},{header:"Furnace",key:"furnace",width:10},{header:"TC",key:"tc",width:10},
+    ];
+    ws1.getRow(1).font=HEADER_FONT; ws1.getRow(1).fill=HEADER_FILL;
+    mergedGC.forEach(r=>{
+      const row=ws1.addRow({
+        compound:r.compound, signal:r.signal, inj:r.inj, date:r.tMs?fmtDate(r.tMs):"",
+        seg:r.segId!==null?("#"+(r.segId+1)):"", area:r.area, height:r.height, conc:r.conc, rt:r.rt,
+        sv:r.sv, pv:r.pv, furnace:r.furnace, tc:r.tc
+      });
+      if(r.segColor){
+        const fill={type:"pattern",pattern:"solid",fgColor:{argb:segArgb(r.segColor)}};
+        row.eachCell(c=>{ c.fill=fill; });
+      }
+    });
+    ws1.views=[{state:"frozen",ySplit:1}];
+
+    // Segments — one row per detected stable segment, same color as above
+    const ws2=wb.addWorksheet("Segments");
+    ws2.columns=[
+      {header:"Segment",key:"seg",width:10},{header:"Start",key:"start",width:20},
+      {header:"End",key:"end",width:20},{header:"Duration (min)",key:"dur",width:14},
+      {header:"NH3 SV avg",key:"sv",width:12},{header:"NH3 PV avg",key:"pv",width:12},
+      {header:"Furnace avg",key:"furnace",width:12},{header:"TC avg",key:"tc",width:12},
+    ];
+    ws2.getRow(1).font=HEADER_FONT; ws2.getRow(1).fill=HEADER_FILL;
+    segments.forEach(s=>{
+      const row=ws2.addRow({
+        seg:"#"+(s.id+1), start:fmtDate(s.startMs), end:fmtDate(s.endMs),
+        dur:Number(((s.endMs-s.startMs)/60000).toFixed(1)),
+        sv:Number(s.svVal.toFixed(2)), pv:Number(s.meanPV.toFixed(2)),
+        furnace:Number(s.furnaceVal.toFixed(2)), tc:Number(s.meanTC.toFixed(2)),
+      });
+      row.eachCell(c=>{ c.fill={type:"pattern",pattern:"solid",fgColor:{argb:segArgb(s.color)}}; });
+    });
+    ws2.views=[{state:"frozen",ySplit:1}];
+
+    // Method — settings used, for reproducibility
+    const ws3=wb.addWorksheet("Method");
+    ws3.columns=[{header:"Item",key:"item",width:36},{header:"Setting",key:"val",width:44}];
+    ws3.getRow(1).font=HEADER_FONT; ws3.getRow(1).fill=HEADER_FILL;
+    [
+      ["Reactor",document.querySelector('input[name=reactor]:checked').value],
+      ["NH3 SV column",$("colSV").value],
+      ["NH3 PV column",$("colPV").value],
+      ["Furnace column",$("colFurnace").value],
+      ["TC column",$("colTC").value],
+      ["GC signal",$("colSignal").value],
+      ["Stability window (points)",$("winPts").value],
+      ["Furnace flatness threshold (°C, over window)",$("tempFlat").value],
+      ["Temp tolerance (%, TC vs Furnace)",$("tempTol").value],
+      ["Flow stability tolerance (%, PV std vs SV)",$("flowStabTol").value],
+      ["Target search flow tolerance",$("targetFlowEps").value],
+      ["Gases included",Array.from(document.querySelectorAll(".gasChk:checked")).map(el=>el.value).join(", ")],
+      ["DAQ files",daqFileNames.join(", ")],
+    ].forEach(([item,val])=>ws3.addRow({item,val}));
+
+    const buf=await wb.xlsx.writeBuffer();
+    const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download="GC_DAQ_merged.xlsx";a.style.display="none";
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1500);
+
+    $("excelBtn").textContent=prevLabel;
+    $("excelBtn").disabled=false;
+  }catch(err){
+    setStatus("runStatus","Excel 저장 오류: "+err.message,"bad");
+    $("excelBtn").disabled=false;
+    $("excelBtn").textContent="최종 Excel 다운로드";
+  }
+};
+
+// Warn inside embedded preview
+window.addEventListener("DOMContentLoaded",()=>{
+  let topLevel=false;
+  try{topLevel=(window.self===window.top)}catch(e){}
+  if(!topLevel){
+    const box=document.createElement("div");
+    box.style.cssText="position:fixed;left:15px;right:15px;bottom:15px;background:#fff3cd;border:1px solid #dfc45e;border-radius:10px;padding:11px 14px;z-index:99999;font-size:12.5px;color:#5d511b;box-shadow:0 3px 14px rgba(0,0,0,.12)";
+    box.innerHTML="<b>미리보기 모드</b>: Excel 다운로드가 막힐 수 있습니다. 이 HTML 파일을 PC에 저장한 뒤 Chrome에서 직접 열어주세요.";
+    document.body.appendChild(box);
+  }
+});
+</script>
+</body>
+</html>
